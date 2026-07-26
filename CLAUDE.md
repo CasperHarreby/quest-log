@@ -47,6 +47,18 @@ server). There is nothing to install or compile.
 - Streak: `computeStreak()` counts consecutive days ending today (today may be
   unfinished) that appear in `completedDates`.
 
+## Deployment
+- Live at: https://casperharreby.github.io/quest-log/
+- Hosted on GitHub Pages (master branch, repo: CasperHarreby/quest-log).
+- When the user says "deploy", "push it", "update it", or similar — stage the
+  changed file(s), commit with a short message, and push:
+  ```
+  git add quest-log.html
+  git commit -m "<short description of change>"
+  git push
+  ```
+  GitHub Pages redeploys automatically within ~1 minute after push.
+
 ## Common edits
 - Change XP or difficulty: edit `DAILY_XP`, `WEEKLY_XP`, or the `xpForLevel`
   formula.
