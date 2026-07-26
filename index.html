@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
   :root {
     --bg: #14101f;
@@ -380,15 +381,112 @@
     .chips { justify-content: center; }
     .weeknav .label { min-width: 0; }
   }
+
+  /* ---------- Login screen ---------- */
+  .login-wrap {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .login-card {
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line-strong);
+    border-radius: 20px;
+    padding: 40px 36px;
+    width: 100%;
+    max-width: 380px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .login-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(400px 200px at 50% 0%, rgba(231,178,76,0.08), transparent 70%);
+    pointer-events: none;
+  }
+  .login-card h1 {
+    font-family: 'Cinzel', Georgia, serif;
+    font-weight: 700;
+    font-size: 26px;
+    letter-spacing: 0.06em;
+    margin: 0 0 8px;
+    color: var(--gold-soft);
+    text-shadow: 0 2px 18px rgba(231,178,76,0.18);
+  }
+  .login-card p {
+    color: var(--muted);
+    font-size: 13.5px;
+    margin: 0 0 28px;
+    line-height: 1.5;
+  }
+  .login-input {
+    width: 100%;
+    background: rgba(0,0,0,0.22);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 11px 14px;
+    margin-bottom: 12px;
+    transition: border-color .15s;
+  }
+  .login-input::placeholder { color: var(--muted-2); }
+  .login-input:focus { outline: none; border-color: var(--violet-dim); }
+  .login-btn {
+    width: 100%;
+    background: rgba(231,178,76,0.14);
+    border: 1px solid var(--line-strong);
+    color: var(--gold-soft);
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: 'Cinzel', serif;
+    font-size: 14px;
+    letter-spacing: 0.06em;
+    padding: 12px;
+    transition: background .15s;
+  }
+  .login-btn:hover { background: rgba(231,178,76,0.26); }
+  .login-btn:disabled { opacity: 0.5; cursor: default; }
+  .login-msg {
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--emerald);
+    min-height: 20px;
+    line-height: 1.4;
+  }
+  .login-msg.err { color: var(--danger); }
 </style>
 </head>
 <body>
-<div class="app" id="app"></div>
+
+<div id="login" style="display:none">
+  <div class="login-wrap">
+    <div class="login-card">
+      <h1>Casper's Quest Log</h1>
+      <p>Enter your email to receive a magic sign-in link.</p>
+      <input class="login-input" id="login-email" type="email" placeholder="your@email.com" autocomplete="email">
+      <button class="login-btn" id="login-btn">Send Magic Link</button>
+      <div class="login-msg" id="login-msg"></div>
+    </div>
+  </div>
+</div>
+
+<div class="app" id="app" style="display:none"></div>
 <div class="toast-wrap" id="toasts"></div>
 
 <script>
 (function () {
   "use strict";
+
+  // ---------- Supabase ----------
+  var SUPABASE_URL = 'https://ohetyemqmfwglapbhgzj.supabase.co';
+  var SUPABASE_KEY = 'sb_publishable_EA4ylN8icKrqbM9AjuBggQ_8Dy1g6kD';
+  var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
   // ---------- Config ----------
   var STORAGE_KEY = "questlog:v1";
@@ -402,24 +500,24 @@
   // ---------- State ----------
   var state = { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {} };
   var viewMonday = mondayOf(new Date());
-  var lastFocus = null;      // {kind:'weekly'} or {kind:'daily', date:'YYYY-MM-DD'}
+  var lastFocus = null;
   var prevLevel = 1;
+  var currentUser = null;
+  var saveTimer = null;
 
   // ---------- Date helpers ----------
   function pad(n){ return (n < 10 ? "0" : "") + n; }
   function toKey(d){ return d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()); }
-  function parseKey(k){ var p = k.split("-"); return new Date(+p[0], +p[1]-1, +p[2]); }
   function addDays(d, n){ return new Date(d.getFullYear(), d.getMonth(), d.getDate()+n); }
   function mondayOf(d){
-    var day = d.getDay();               // 0 Sun .. 6 Sat
+    var day = d.getDay();
     var offset = (day === 0) ? -6 : 1 - day;
     return new Date(d.getFullYear(), d.getMonth(), d.getDate()+offset);
   }
-  function sameDay(a,b){ return toKey(a) === toKey(b); }
 
   // ---------- Level maths ----------
-  function xpForLevel(L){ return 100 * L; }                       // xp to go from L to L+1
-  function cumToReach(L){ return 100 * (L-1) * L / 2; }           // total xp to be AT level L
+  function xpForLevel(L){ return 100 * L; }
+  function cumToReach(L){ return 100 * (L-1) * L / 2; }
   function levelFromXp(xp){
     var L = 1;
     while (cumToReach(L+1) <= xp) L++;
@@ -438,19 +536,28 @@
 
   // ---------- Storage ----------
   function save(){
-    try {
-      if (window.storage && window.storage.set) {
-        window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
-      }
-    } catch (e) { /* stay in-memory this session */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(e){}
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function(){
+      if (!currentUser) return;
+      sb.from('quest_data').upsert(
+        { user_id: currentUser.id, data: state, updated_at: new Date().toISOString() },
+        { onConflict: 'user_id' }
+      ).then(function(res){
+        if (res.error) console.error('Save error:', res.error);
+      });
+    }, 1200);
   }
-  function load(cb){
-    if (!(window.storage && window.storage.get)) { cb(); return; }
-    try {
-      window.storage.get(STORAGE_KEY).then(function(res){
-        if (res && res.value) {
+
+  function loadFromRemote(cb){
+    sb.from('quest_data')
+      .select('data')
+      .eq('user_id', currentUser.id)
+      .maybeSingle()
+      .then(function(res){
+        if (res.data && res.data.data){
           try {
-            var parsed = JSON.parse(res.value);
+            var parsed = res.data.data;
             if (parsed && parsed.character) state = parsed;
             if (!state.completedDates) state.completedDates = {};
             if (!state.weeks) state.weeks = {};
@@ -458,8 +565,38 @@
         }
         cb();
       }).catch(function(){ cb(); });
-    } catch (e) { cb(); }
   }
+
+  // ---------- Auth UI ----------
+  function showLogin(){
+    document.getElementById('login').style.display = '';
+    document.getElementById('app').style.display = 'none';
+  }
+  function showApp(){
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('app').style.display = '';
+  }
+
+  document.getElementById('login-btn').addEventListener('click', function(){
+    var email = document.getElementById('login-email').value.trim();
+    var msg = document.getElementById('login-msg');
+    var btn = document.getElementById('login-btn');
+    if (!email){ msg.textContent = 'Please enter your email.'; msg.className = 'login-msg err'; return; }
+    btn.disabled = true;
+    msg.textContent = 'Sending…'; msg.className = 'login-msg';
+    sb.auth.signInWithOtp({
+      email: email,
+      options: { emailRedirectTo: window.location.origin + window.location.pathname }
+    }).then(function(res){
+      btn.disabled = false;
+      if (res.error){ msg.textContent = res.error.message; msg.className = 'login-msg err'; }
+      else { msg.textContent = 'Magic link sent! Check your inbox ✓'; }
+    });
+  });
+
+  document.getElementById('login-email').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') document.getElementById('login-btn').click();
+  });
 
   // ---------- Week data access ----------
   function weekKey(){ return toKey(viewMonday); }
@@ -503,8 +640,7 @@
     var arr = dayList(dateKey);
     var q = find(arr, id);
     if (q && q.done) state.character.totalXp = Math.max(0, state.character.totalXp - DAILY_XP);
-    var next = arr.filter(function(x){ return x.id !== id; });
-    currentWeek().days[dateKey] = next;
+    currentWeek().days[dateKey] = arr.filter(function(x){ return x.id !== id; });
     refreshDate(dateKey);
     commit();
   }
@@ -527,7 +663,6 @@
   }
   function find(arr, id){ for (var i=0;i<arr.length;i++) if (arr[i].id===id) return arr[i]; return null; }
 
-  // keep completedDates (for streak) in sync for a given date
   function refreshDate(dateKey){
     var arr = (currentWeek().days[dateKey] || []);
     var any = arr.some(function(q){ return q.done; });
@@ -543,12 +678,21 @@
     commit();
   }
 
+  function signOut(){
+    sb.auth.signOut().then(function(){
+      currentUser = null;
+      state = { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {} };
+      viewMonday = mondayOf(new Date());
+      prevLevel = 1;
+    });
+  }
+
   // ---------- Streak ----------
   function computeStreak(){
     var set = state.completedDates || {};
     var cursor = new Date();
     cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate());
-    if (!set[toKey(cursor)]) cursor = addDays(cursor, -1); // allow today unfinished
+    if (!set[toKey(cursor)]) cursor = addDays(cursor, -1);
     var count = 0;
     while (set[toKey(cursor)]) { count++; cursor = addDays(cursor, -1); }
     return count;
@@ -564,13 +708,13 @@
     return n;
   }
 
-  // ---------- Commit (save + render + level check) ----------
+  // ---------- Commit ----------
   function commit(){
     save();
     render();
     var lvl = levelFromXp(state.character.totalXp);
     if (lvl > prevLevel){
-      toast("LEVEL " + lvl + "  \u2014  " + rankFor(lvl), "levelup");
+      toast("LEVEL " + lvl + "  —  " + rankFor(lvl), "levelup");
       var med = document.querySelector(".medallion");
       if (med){ med.classList.remove("levelup"); void med.offsetWidth; med.classList.add("levelup"); }
     }
@@ -601,7 +745,7 @@
     var end = addDays(viewMonday, 6);
     var a = MON[viewMonday.getMonth()] + " " + viewMonday.getDate();
     var b = MON[end.getMonth()] + " " + end.getDate();
-    return a + " \u2013 " + b + ", " + end.getFullYear();
+    return a + " – " + b + ", " + end.getFullYear();
   }
   function weekRelative(){
     var thisMon = mondayOf(new Date());
@@ -618,7 +762,7 @@
       '<button class="check" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" ' +
         'aria-pressed="' + q.done + '" aria-label="Toggle quest">' + CHECK_SVG + '</button>' +
       '<span class="q-text" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" role="button" tabindex="0">' + esc(q.text) + '</span>' +
-      '<button class="remove" data-act="remove" ' + scopeAttr + ' data-id="' + q.id + '" aria-label="Remove quest">\u00d7</button>' +
+      '<button class="remove" data-act="remove" ' + scopeAttr + ' data-id="' + q.id + '" aria-label="Remove quest">×</button>' +
     '</li>';
   }
 
@@ -635,12 +779,10 @@
     var week = currentWeek();
     var todayKey = toKey(new Date());
 
-    // Weekly quests
     var weeklyHtml = week.weekly.length
       ? week.weekly.map(function(q){ return questRow(q, 'data-scope="weekly"'); }).join("")
       : '<div class="empty">No weekly quests yet. Add a goal for the whole week.</div>';
 
-    // Day cards (Mon..Sun)
     var daysHtml = "";
     for (var i=0;i<7;i++){
       var d = addDays(viewMonday, i);
@@ -658,7 +800,7 @@
           '</div>' +
           rows +
           '<div class="add-row">' +
-            '<input class="add-input" data-add="daily" data-date="' + dk + '" placeholder="Add quest\u2026" maxlength="120" aria-label="Add quest for ' + DOW[i] + '">' +
+            '<input class="add-input" data-add="daily" data-date="' + dk + '" placeholder="Add quest…" maxlength="120" aria-label="Add quest for ' + DOW[i] + '">' +
             '<button class="add-btn" data-act="add" data-add="daily" data-date="' + dk + '" aria-label="Add">+</button>' +
           '</div>' +
         '</div>';
@@ -669,7 +811,10 @@
     document.getElementById("app").innerHTML =
       '<div class="topbar">' +
         '<div class="brand"><h1>Casper\'s Quest Log</h1><p>Level up your week, one quest at a time.</p></div>' +
-        '<button class="ghost-btn" data-act="reset">Reset progress</button>' +
+        '<div style="display:flex;gap:8px;align-items:center">' +
+          '<button class="ghost-btn" data-act="reset">Reset progress</button>' +
+          '<button class="ghost-btn" data-act="signout">Sign out</button>' +
+        '</div>' +
       '</div>' +
 
       '<section class="character">' +
@@ -689,17 +834,17 @@
           '<div class="xp-line"><span>Progress</span><span><b>' + into + '</b> / ' + need + ' XP</span></div>' +
           '<div class="xp-bar"><div class="xp-fill" id="xpfill"></div></div>' +
           '<div class="chips">' +
-            '<span class="chip"><span class="ic">\u2694\uFE0F</span><b>' + done + '</b>&nbsp;quests done</span>' +
-            '<span class="chip"><span class="ic">\uD83D\uDD25</span><b>' + streak + '</b>&nbsp;day streak</span>' +
-            '<span class="chip"><span class="ic">\u2728</span><b>' + xp + '</b>&nbsp;total XP</span>' +
+            '<span class="chip"><span class="ic">⚔️</span><b>' + done + '</b>&nbsp;quests done</span>' +
+            '<span class="chip"><span class="ic">🔥</span><b>' + streak + '</b>&nbsp;day streak</span>' +
+            '<span class="chip"><span class="ic">✨</span><b>' + xp + '</b>&nbsp;total XP</span>' +
           '</div>' +
         '</div>' +
       '</section>' +
 
       '<div class="weeknav">' +
-        '<button class="nav-btn" data-act="prev" aria-label="Previous week">\u2039</button>' +
+        '<button class="nav-btn" data-act="prev" aria-label="Previous week">‹</button>' +
         '<div class="label">' + weekLabel() + '<small>' + weekRelative() + '</small></div>' +
-        '<button class="nav-btn" data-act="next" aria-label="Next week">\u203a</button>' +
+        '<button class="nav-btn" data-act="next" aria-label="Next week">›</button>' +
         '<button class="today-btn" data-act="today">Today</button>' +
       '</div>' +
 
@@ -707,7 +852,7 @@
         '<p class="eyebrow">Weekly Quests</p>' +
         '<ul class="quests">' + weeklyHtml + '</ul>' +
         '<div class="add-row">' +
-          '<input class="add-input" data-add="weekly" placeholder="Add a weekly quest\u2026" maxlength="120" aria-label="Add a weekly quest">' +
+          '<input class="add-input" data-add="weekly" placeholder="Add a weekly quest…" maxlength="120" aria-label="Add a weekly quest">' +
           '<button class="add-btn" data-act="add" data-add="weekly" aria-label="Add">+</button>' +
         '</div>' +
       '</section>' +
@@ -715,13 +860,11 @@
       '<p class="eyebrow">The Week</p>' +
       '<div class="days">' + daysHtml + '</div>';
 
-    // animate xp fill after paint
     requestAnimationFrame(function(){
       var f = document.getElementById("xpfill");
       if (f) f.style.width = (pct * 100) + "%";
     });
 
-    // floating XP number
     if (pendingXp){
       toast('<span class="xp">+' + pendingXp + ' XP</span>');
       pendingXp = 0;
@@ -767,6 +910,7 @@
     else if (act === "next"){ viewMonday = addDays(viewMonday, 7); render(); }
     else if (act === "today"){ viewMonday = mondayOf(new Date()); render(); }
     else if (act === "reset"){ resetAll(); }
+    else if (act === "signout"){ signOut(); }
   });
 
   document.addEventListener("keydown", function(e){
@@ -783,10 +927,23 @@
   });
 
   // ---------- Boot ----------
-  load(function(){
-    prevLevel = levelFromXp(state.character.totalXp);
-    render();
+  sb.auth.onAuthStateChange(function(event, session){
+    if (session && !currentUser){
+      currentUser = session.user;
+      loadFromRemote(function(){
+        prevLevel = levelFromXp(state.character.totalXp);
+        showApp();
+        render();
+      });
+    } else if (!session){
+      currentUser = null;
+      state = { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {} };
+      viewMonday = mondayOf(new Date());
+      prevLevel = 1;
+      showLogin();
+    }
   });
+
 })();
 </script>
 </body>
