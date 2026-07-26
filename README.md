@@ -15,14 +15,14 @@ No account, no backend. Data lives in your browser's localStorage.
 
 ## Files
 
-- `quest-log.html` — the entire app (HTML + CSS + JS, ~700 lines, no build step)
+- `index.html` — the entire app (HTML + CSS + JS, ~700 lines, no build step)
 
 ## Deploying changes
 
 Edit `quest-log.html`, then:
 
 ```bash
-git add quest-log.html
+git add index.html
 git commit -m "describe your change"
 git push
 ```

@@ -9,7 +9,7 @@ Open `quest-log.html` in any modern browser (double-click it, or use a local
 server). There is nothing to install or compile.
 
 ## Files
-- `quest-log.html` — the entire app: HTML structure, a `<style>` block for all
+- `index.html` — the entire app: HTML structure, a `<style>` block for all
   CSS, and a `<script>` block for all logic. Roughly 700 lines.
 - `CLAUDE.md` — this file.
 
@@ -53,7 +53,7 @@ server). There is nothing to install or compile.
 - When the user says "deploy", "push it", "update it", or similar — stage the
   changed file(s), commit with a short message, and push:
   ```
-  git add quest-log.html
+  git add index.html
   git commit -m "<short description of change>"
   git push
   ```
