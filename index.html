@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
     --bg: #14101f;
@@ -321,6 +322,17 @@
   .quest:hover .remove, .quest:focus-within .remove { opacity: 1; }
   .remove:hover { color: var(--danger); }
 
+  .overdue-badge {
+    flex: 0 0 auto; font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--danger); border: 1px solid rgba(224,106,106,0.4);
+    border-radius: 6px; padding: 1px 5px; margin-top: 1px;
+  }
+  .g-badge {
+    flex: 0 0 auto; font-size: 9px; font-weight: 700; color: var(--violet);
+    border: 1px solid var(--line); border-radius: 5px; width: 15px; height: 15px;
+    display: grid; place-items: center; margin-top: 1px;
+  }
+
   .empty { font-size: 12px; color: var(--muted-2); font-style: italic; padding: 4px 4px 8px; }
 
   /* ---------- Add row ---------- */
@@ -488,6 +500,12 @@
   var SUPABASE_KEY = 'sb_publishable_EA4ylN8icKrqbM9AjuBggQ_8Dy1g6kD';
   var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
+  // ---------- Google Tasks config ----------
+  var GOOGLE_CLIENT_ID = '749692817208-u64k0pl8mqa0av4llh7cjnirnqqs6uo0.apps.googleusercontent.com';
+  var GOOGLE_TASKS_SCOPE = 'https://www.googleapis.com/auth/tasks';
+  var GOOGLE_LIST_NAMES = { calendar: 'Opgaver (Kalender)', misc: 'To-do (Misc)' };
+  var GOOGLE_TASKS_API = 'https://tasks.googleapis.com/tasks/v1';
+
   // ---------- Config ----------
   var STORAGE_KEY = "questlog:v1";
   var DAILY_XP = 10;
@@ -498,12 +516,24 @@
   var RING_C = 2 * Math.PI * RING_R;
 
   // ---------- State ----------
-  var state = { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {} };
+  function freshState(){
+    return { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {},
+      google: { calendarListId: null, miscListId: null, lastSyncedAt: null } };
+  }
+  var state = freshState();
   var viewMonday = mondayOf(new Date());
   var lastFocus = null;
   var prevLevel = 1;
   var currentUser = null;
   var saveTimer = null;
+
+  // ---------- Google Tasks runtime (never persisted) ----------
+  var googleAccessToken = null;
+  var googleTokenClient = null;
+  var googleSyncing = false;
+  var googleLastError = null;
+  var googleSyncStatus = 'disconnected'; // disconnected | idle | syncing | error
+  var pendingAfterAuth = null;
 
   // ---------- Date helpers ----------
   function pad(n){ return (n < 10 ? "0" : "") + n; }
@@ -513,6 +543,10 @@
     var day = d.getDay();
     var offset = (day === 0) ? -6 : 1 - day;
     return new Date(d.getFullYear(), d.getMonth(), d.getDate()+offset);
+  }
+  function dateFromKey(key){
+    var parts = key.split("-");
+    return new Date(+parts[0], +parts[1]-1, +parts[2]);
   }
 
   // ---------- Level maths ----------
@@ -561,6 +595,7 @@
             if (parsed && parsed.character) state = parsed;
             if (!state.completedDates) state.completedDates = {};
             if (!state.weeks) state.weeks = {};
+            if (!state.google) state.google = { calendarListId: null, miscListId: null, lastSyncedAt: null };
           } catch(e){}
         }
         cb();
@@ -600,17 +635,18 @@
 
   // ---------- Week data access ----------
   function weekKey(){ return toKey(viewMonday); }
-  function currentWeek(){
-    var k = weekKey();
-    if (!state.weeks[k]) state.weeks[k] = { weekly: [], days: {} };
-    if (!state.weeks[k].days) state.weeks[k].days = {};
-    return state.weeks[k];
+  function weekBucket(mondayKey){
+    if (!state.weeks[mondayKey]) state.weeks[mondayKey] = { weekly: [], days: {} };
+    if (!state.weeks[mondayKey].days) state.weeks[mondayKey].days = {};
+    return state.weeks[mondayKey];
   }
-  function dayList(dateKey){
-    var w = currentWeek();
+  function currentWeek(){ return weekBucket(weekKey()); }
+  function dayBucket(dateKey){
+    var w = weekBucket(toKey(mondayOf(dateFromKey(dateKey))));
     if (!w.days[dateKey]) w.days[dateKey] = [];
     return w.days[dateKey];
   }
+  function dayList(dateKey){ return dayBucket(dateKey); }
   function uid(){
     return (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
       : "q" + Date.now() + Math.random().toString(36).slice(2,7);
@@ -635,36 +671,47 @@
     if (q && q.done) state.character.totalXp = Math.max(0, state.character.totalXp - WEEKLY_XP);
     w.weekly = w.weekly.filter(function(x){ return x.id !== id; });
     commit();
+    if (q) pushGoogleDelete(q);
   }
   function removeDaily(dateKey, id){
     var arr = dayList(dateKey);
     var q = find(arr, id);
     if (q && q.done) state.character.totalXp = Math.max(0, state.character.totalXp - DAILY_XP);
     currentWeek().days[dateKey] = arr.filter(function(x){ return x.id !== id; });
-    refreshDate(dateKey);
+    refreshDateBucket(dateKey);
     commit();
+    if (q) pushGoogleDelete(q);
   }
-  function toggleWeekly(id){
-    var q = find(currentWeek().weekly, id); if (!q) return;
+  function toggleWeeklyQuest(q, silent){
     q.done = !q.done;
     state.character.totalXp += q.done ? WEEKLY_XP : -WEEKLY_XP;
     if (state.character.totalXp < 0) state.character.totalXp = 0;
-    if (q.done) flashXp(WEEKLY_XP);
-    commit();
+    if (q.done && !silent) flashXp(WEEKLY_XP);
   }
-  function toggleDaily(dateKey, id){
-    var q = find(dayList(dateKey), id); if (!q) return;
+  function toggleWeekly(id){
+    var q = find(currentWeek().weekly, id); if (!q) return;
+    toggleWeeklyQuest(q);
+    commit();
+    pushGoogleCompletion(q);
+  }
+  function toggleDailyQuest(q, dateKey, silent){
     q.done = !q.done;
     state.character.totalXp += q.done ? DAILY_XP : -DAILY_XP;
     if (state.character.totalXp < 0) state.character.totalXp = 0;
-    if (q.done) flashXp(DAILY_XP);
-    refreshDate(dateKey);
+    if (q.done && !silent) flashXp(DAILY_XP);
+    refreshDateBucket(dateKey);
+  }
+  function toggleDaily(dateKey, id){
+    var q = find(dayList(dateKey), id); if (!q) return;
+    toggleDailyQuest(q, dateKey);
     commit();
+    pushGoogleCompletion(q);
   }
   function find(arr, id){ for (var i=0;i<arr.length;i++) if (arr[i].id===id) return arr[i]; return null; }
 
-  function refreshDate(dateKey){
-    var arr = (currentWeek().days[dateKey] || []);
+  function refreshDateBucket(dateKey){
+    var w = weekBucket(toKey(mondayOf(dateFromKey(dateKey))));
+    var arr = w.days[dateKey] || [];
     var any = arr.some(function(q){ return q.done; });
     if (any) state.completedDates[dateKey] = true;
     else delete state.completedDates[dateKey];
@@ -672,7 +719,7 @@
 
   function resetAll(){
     if (!confirm("Reset all progress? This clears your level, XP, and every quest. This cannot be undone.")) return;
-    state = { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {} };
+    state = freshState();
     viewMonday = mondayOf(new Date());
     prevLevel = 1;
     commit();
@@ -681,9 +728,12 @@
   function signOut(){
     sb.auth.signOut().then(function(){
       currentUser = null;
-      state = { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {} };
+      state = freshState();
       viewMonday = mondayOf(new Date());
       prevLevel = 1;
+      googleAccessToken = null;
+      googleSyncStatus = 'disconnected';
+      googleLastError = null;
     });
   }
 
@@ -733,6 +783,240 @@
     setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); }, 1900);
   }
 
+  // ---------- Google Tasks: auth ----------
+  function initGoogleTokenClient(){
+    if (googleTokenClient) return true;
+    if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return false;
+    googleTokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_TASKS_SCOPE,
+      callback: handleGoogleTokenResponse
+    });
+    return true;
+  }
+  function handleGoogleTokenResponse(resp){
+    if (resp && resp.access_token){
+      googleAccessToken = resp.access_token;
+      var cb = pendingAfterAuth; pendingAfterAuth = null;
+      if (cb) cb();
+    } else {
+      pendingAfterAuth = null;
+      googleLastError = "Google sign-in was cancelled or failed.";
+    }
+  }
+  function ensureGoogleToken(cb){
+    if (googleAccessToken){ cb(); return; }
+    if (!initGoogleTokenClient()){
+      googleLastError = "Google sign-in is still loading — try again in a moment.";
+      throw new Error(googleLastError);
+    }
+    pendingAfterAuth = cb;
+    googleTokenClient.requestAccessToken();
+  }
+  function googleApiFetch(url, options, retried){
+    options = options || {};
+    options.headers = Object.assign({}, options.headers, { Authorization: "Bearer " + googleAccessToken });
+    return fetch(url, options).then(function(res){
+      if (res.status === 401 && !retried){
+        googleAccessToken = null;
+        return new Promise(function(resolve, reject){
+          ensureGoogleToken(function(){
+            googleApiFetch(url, options, true).then(resolve, reject);
+          });
+        });
+      }
+      if (!res.ok) return res.text().then(function(t){ throw new Error("Google API error " + res.status + ": " + t); });
+      if (res.status === 204) return null;
+      return res.json();
+    });
+  }
+
+  // ---------- Google Tasks: list resolution ----------
+  function resolveGoogleLists(force){
+    if (!force && state.google.calendarListId && state.google.miscListId){
+      return Promise.resolve();
+    }
+    return googleApiFetch(GOOGLE_TASKS_API + "/users/@me/lists").then(function(res){
+      var items = (res && res.items) || [];
+      var byTitle = {};
+      items.forEach(function(l){ byTitle[l.title] = l.id; });
+      var calId = byTitle[GOOGLE_LIST_NAMES.calendar];
+      var miscId = byTitle[GOOGLE_LIST_NAMES.misc];
+      if (!calId) throw new Error('Google Tasks list "' + GOOGLE_LIST_NAMES.calendar + '" not found.');
+      if (!miscId) throw new Error('Google Tasks list "' + GOOGLE_LIST_NAMES.misc + '" not found.');
+      state.google.calendarListId = calId;
+      state.google.miscListId = miscId;
+    });
+  }
+
+  // ---------- Google Tasks: fetch ----------
+  function fetchAllGoogleTasks(listId, pageToken, acc){
+    acc = acc || [];
+    var url = GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(listId) + "/tasks?showCompleted=false&maxResults=100";
+    if (pageToken) url += "&pageToken=" + encodeURIComponent(pageToken);
+    return googleApiFetch(url).then(function(res){
+      var items = (res && res.items) || [];
+      acc = acc.concat(items);
+      if (res && res.nextPageToken) return fetchAllGoogleTasks(listId, res.nextPageToken, acc);
+      return acc;
+    });
+  }
+
+  // ---------- Google Tasks: push (called only from user-triggered mutations) ----------
+  function pushGoogleCompletion(q){
+    if (!q || !q.gtId || !q.gtListId || !googleAccessToken) return;
+    googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(q.gtListId) + "/tasks/" + encodeURIComponent(q.gtId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: q.done ? "completed" : "needsAction" })
+    }).catch(function(e){ googleLastError = e.message; });
+  }
+  function pushGoogleDelete(q){
+    if (!q || !q.gtId || !q.gtListId || !googleAccessToken) return;
+    googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(q.gtListId) + "/tasks/" + encodeURIComponent(q.gtId), {
+      method: "DELETE"
+    }).catch(function(e){ googleLastError = e.message; });
+  }
+
+  // ---------- Google Tasks: index of already-linked quests ----------
+  function indexLinkedQuests(listId){
+    var byId = {};
+    for (var wk in state.weeks){
+      var days = state.weeks[wk].days || {};
+      for (var dk in days){
+        days[dk].forEach(function(q){
+          if (q.gtListId === listId) byId[q.gtId] = { q: q, dateKey: dk };
+        });
+      }
+    }
+    return byId;
+  }
+  function indexLinkedWeeklyQuests(listId){
+    var byId = {};
+    for (var wk in state.weeks){
+      (state.weeks[wk].weekly || []).forEach(function(q){
+        if (q.gtListId === listId) byId[q.gtId] = { q: q, weekKey: wk };
+      });
+    }
+    return byId;
+  }
+
+  // ---------- Google Tasks: sync passes ----------
+  var googleXpGained = 0;
+  function syncCalendarList(){
+    var listId = state.google.calendarListId;
+    return fetchAllGoogleTasks(listId).then(function(items){
+      var todayKey = toKey(new Date());
+      var existing = indexLinkedQuests(listId);
+      var seen = {};
+      items.forEach(function(task){
+        seen[task.id] = true;
+        if (existing[task.id]) return; // already linked locally
+        if (!task.due) return; // calendar list is due-date-driven only
+        var d = new Date(task.due); // Google due is midnight UTC
+        var dueKey = d.getUTCFullYear() + "-" + pad(d.getUTCMonth()+1) + "-" + pad(d.getUTCDate());
+        var targetKey = dueKey >= todayKey ? dueKey : todayKey;
+        dayBucket(targetKey).push({ id: uid(), text: task.title || "(untitled)", done: false,
+          gtId: task.id, gtListId: listId, gtDueKey: dueKey });
+      });
+      for (var gtId in existing){
+        if (seen[gtId]) continue;
+        var entry = existing[gtId];
+        if (!entry.q.done){
+          toggleDailyQuest(entry.q, entry.dateKey, true);
+          googleXpGained += DAILY_XP;
+        }
+      }
+    });
+  }
+  function syncMiscList(){
+    var listId = state.google.miscListId;
+    return fetchAllGoogleTasks(listId).then(function(items){
+      var existing = indexLinkedWeeklyQuests(listId);
+      var seen = {};
+      var thisWeekKey = toKey(mondayOf(new Date()));
+      items.forEach(function(task){
+        seen[task.id] = true;
+        if (existing[task.id]) return;
+        weekBucket(thisWeekKey).weekly.push({ id: uid(), text: task.title || "(untitled)", done: false,
+          gtId: task.id, gtListId: listId });
+      });
+      for (var gtId in existing){
+        if (seen[gtId]) continue;
+        var entry = existing[gtId];
+        if (!entry.q.done){
+          toggleWeeklyQuest(entry.q, true);
+          googleXpGained += WEEKLY_XP;
+        }
+      }
+    });
+  }
+
+  // ---------- Google Tasks: overdue rollover (local only, no network) ----------
+  function runOverdueRollover(){
+    var listId = state.google.calendarListId;
+    if (!listId) return;
+    var todayKey = toKey(new Date());
+    var moves = [];
+    for (var wk in state.weeks){
+      var days = state.weeks[wk].days || {};
+      for (var dk in days){
+        if (dk >= todayKey) continue;
+        days[dk].forEach(function(q){
+          if (q.gtListId === listId && !q.done) moves.push({ q: q, fromKey: dk });
+        });
+      }
+    }
+    if (!moves.length) return;
+    moves.forEach(function(m){
+      var fromArr = state.weeks[toKey(mondayOf(dateFromKey(m.fromKey)))].days[m.fromKey];
+      var idx = fromArr.indexOf(m.q);
+      if (idx !== -1) fromArr.splice(idx, 1);
+      dayBucket(todayKey).push(m.q);
+      refreshDateBucket(m.fromKey);
+    });
+    refreshDateBucket(todayKey);
+  }
+
+  // ---------- Google Tasks: sync orchestration ----------
+  function syncGoogleTasks(){
+    if (googleSyncing) return;
+    googleSyncing = true;
+    googleSyncStatus = 'syncing';
+    googleLastError = null;
+    googleXpGained = 0;
+    render();
+
+    function finish(){
+      googleSyncing = false;
+      googleSyncStatus = 'idle';
+      if (googleXpGained > 0) flashXp(googleXpGained);
+      state.google.lastSyncedAt = new Date().toISOString();
+      commit();
+    }
+    function fail(err){
+      googleSyncing = false;
+      googleSyncStatus = 'error';
+      googleLastError = err.message || String(err);
+      toast('Google sync failed: ' + esc(googleLastError));
+      render();
+    }
+
+    new Promise(function(resolve, reject){ ensureGoogleToken(resolve); })
+      .then(function(){ return resolveGoogleLists(); })
+      .catch(function(err){
+        // stale cached list id (e.g. 404) — re-resolve once and retry
+        if (/404/.test(err.message)){
+          return resolveGoogleLists(true);
+        }
+        throw err;
+      })
+      .then(function(){ return syncCalendarList(); })
+      .then(function(){ return syncMiscList(); })
+      .then(function(){ runOverdueRollover(); finish(); })
+      .catch(fail);
+  }
+
   // ---------- Rendering ----------
   function esc(s){
     return String(s).replace(/[&<>"']/g, function(c){
@@ -757,11 +1041,16 @@
     return "In " + diff + " weeks";
   }
 
-  function questRow(q, scopeAttr){
+  function questRow(q, scopeAttr, todayKey){
+    var overdue = todayKey && q.gtDueKey && q.gtDueKey < todayKey && !q.done;
+    var badges =
+      (overdue ? '<span class="overdue-badge" title="Originally due ' + q.gtDueKey + '">Overdue</span>' : '') +
+      (q.gtId ? '<span class="g-badge" title="Synced from Google Tasks">G</span>' : '');
     return '<li class="quest' + (q.done ? ' done' : '') + '">' +
       '<button class="check" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" ' +
         'aria-pressed="' + q.done + '" aria-label="Toggle quest">' + CHECK_SVG + '</button>' +
       '<span class="q-text" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" role="button" tabindex="0">' + esc(q.text) + '</span>' +
+      badges +
       '<button class="remove" data-act="remove" ' + scopeAttr + ' data-id="' + q.id + '" aria-label="Remove quest">×</button>' +
     '</li>';
   }
@@ -790,7 +1079,7 @@
       var isToday = dk === todayKey;
       var list = (week.days[dk] || []);
       var rows = list.length
-        ? '<ul class="quests">' + list.map(function(q){ return questRow(q, 'data-scope="daily" data-date="'+dk+'"'); }).join("") + '</ul>'
+        ? '<ul class="quests">' + list.map(function(q){ return questRow(q, 'data-scope="daily" data-date="'+dk+'"', todayKey); }).join("") + '</ul>'
         : '<div class="empty">No quests</div>';
       daysHtml +=
         '<div class="day' + (isToday ? ' today' : '') + '">' +
@@ -808,10 +1097,16 @@
 
     var nameLabel = state.character.name ? '<span class="name">&nbsp;&middot; ' + esc(state.character.name) + '</span>' : '';
 
+    var syncLabel = { disconnected: "Connect Google Tasks", idle: "Sync now", syncing: "Syncing…", error: "Sync failed — retry" }[googleSyncStatus];
+    var syncTitle = googleSyncStatus === 'error' ? esc(googleLastError || '')
+      : (googleSyncStatus === 'idle' && state.google.lastSyncedAt) ? 'Last synced ' + new Date(state.google.lastSyncedAt).toLocaleTimeString()
+      : '';
+
     document.getElementById("app").innerHTML =
       '<div class="topbar">' +
         '<div class="brand"><h1>Casper\'s Quest Log</h1><p>Level up your week, one quest at a time.</p></div>' +
         '<div style="display:flex;gap:8px;align-items:center">' +
+          '<button class="ghost-btn" data-act="sync-google" title="' + syncTitle + '"' + (googleSyncStatus === 'syncing' ? ' disabled' : '') + '>' + syncLabel + '</button>' +
           '<button class="ghost-btn" data-act="reset">Reset progress</button>' +
           '<button class="ghost-btn" data-act="signout">Sign out</button>' +
         '</div>' +
@@ -911,6 +1206,7 @@
     else if (act === "today"){ viewMonday = mondayOf(new Date()); render(); }
     else if (act === "reset"){ resetAll(); }
     else if (act === "signout"){ signOut(); }
+    else if (act === "sync-google"){ syncGoogleTasks(); }
   });
 
   document.addEventListener("keydown", function(e){
@@ -932,14 +1228,17 @@
       currentUser = session.user;
       loadFromRemote(function(){
         prevLevel = levelFromXp(state.character.totalXp);
+        runOverdueRollover();
         showApp();
         render();
       });
     } else if (!session){
       currentUser = null;
-      state = { character: { totalXp: 0, name: "" }, weeks: {}, completedDates: {} };
+      state = freshState();
       viewMonday = mondayOf(new Date());
       prevLevel = 1;
+      googleAccessToken = null;
+      googleSyncStatus = 'disconnected';
       showLogin();
     }
   });
