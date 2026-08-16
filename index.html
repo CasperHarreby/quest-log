@@ -534,6 +534,7 @@
   var googleLastError = null;
   var googleSyncStatus = 'disconnected'; // disconnected | idle | syncing | error
   var pendingAfterAuth = null;
+  var googleSilentAttempt = false;
 
   // ---------- Date helpers ----------
   function pad(n){ return (n < 10 ? "0" : "") + n; }
@@ -799,13 +800,17 @@
     return true;
   }
   function handleGoogleTokenResponse(resp){
+    var wasSilent = googleSilentAttempt;
+    googleSilentAttempt = false;
     if (resp && resp.access_token){
       googleAccessToken = resp.access_token;
       var cb = pendingAfterAuth; pendingAfterAuth = null;
       if (cb) cb();
+      else if (wasSilent) syncGoogleTasks();
     } else {
       pendingAfterAuth = null;
-      googleLastError = "Google sign-in was cancelled or failed.";
+      if (!wasSilent) googleLastError = "Google sign-in was cancelled or failed.";
+      // a failed silent attempt fails quietly — stays disconnected, no error surfaced
     }
   }
   function ensureGoogleToken(cb){
@@ -816,6 +821,12 @@
     }
     pendingAfterAuth = cb;
     googleTokenClient.requestAccessToken();
+  }
+  function attemptSilentReconnect(){
+    if (!state.google.calendarListId || !state.google.miscListId) return; // never connected before
+    if (!initGoogleTokenClient()) return; // GIS not loaded yet — user can still connect manually
+    googleSilentAttempt = true;
+    googleTokenClient.requestAccessToken({ prompt: '' });
   }
   function googleApiFetch(url, options, retried){
     options = options || {};
@@ -882,12 +893,12 @@
     }).catch(function(e){ googleLastError = e.message; });
   }
   function pushGoogleCreateDaily(q, dateKey){
-    if (!q || !googleAccessToken || !state.google.calendarListId) return;
+    if (!q || !googleAccessToken || !state.google.calendarListId) return Promise.resolve();
     var listId = state.google.calendarListId;
-    googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(listId) + "/tasks", {
+    return googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(listId) + "/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: q.text, due: dateKey + "T00:00:00.000Z" })
+      body: JSON.stringify({ title: q.text, due: dateKey + "T00:00:00.000Z", status: q.done ? "completed" : "needsAction" })
     }).then(function(task){
       q.gtId = task.id;
       q.gtListId = listId;
@@ -896,17 +907,35 @@
     }).catch(function(e){ googleLastError = e.message; });
   }
   function pushGoogleCreateWeekly(q){
-    if (!q || !googleAccessToken || !state.google.miscListId) return;
+    if (!q || !googleAccessToken || !state.google.miscListId) return Promise.resolve();
     var listId = state.google.miscListId;
-    googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(listId) + "/tasks", {
+    return googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(listId) + "/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: q.text })
+      body: JSON.stringify({ title: q.text, status: q.done ? "completed" : "needsAction" })
     }).then(function(task){
       q.gtId = task.id;
       q.gtListId = listId;
       commit();
     }).catch(function(e){ googleLastError = e.message; });
+  }
+
+  // ---------- Google Tasks: backfill quests created while disconnected ----------
+  function backfillUnlinkedQuests(){
+    var promises = [];
+    for (var wk in state.weeks){
+      var week = state.weeks[wk];
+      (week.weekly || []).forEach(function(q){
+        if (!q.gtId) promises.push(pushGoogleCreateWeekly(q));
+      });
+      var days = week.days || {};
+      for (var dk in days){
+        days[dk].forEach(function(q){
+          if (!q.gtId) promises.push(pushGoogleCreateDaily(q, dk));
+        });
+      }
+    }
+    return Promise.all(promises);
   }
 
   // ---------- Google Tasks: index of already-linked quests ----------
@@ -1044,6 +1073,7 @@
       })
       .then(function(){ return syncCalendarList(); })
       .then(function(){ return syncMiscList(); })
+      .then(function(){ return backfillUnlinkedQuests(); })
       .then(function(){ runOverdueRollover(); finish(); })
       .catch(fail);
   }
@@ -1262,6 +1292,7 @@
         runOverdueRollover();
         showApp();
         render();
+        attemptSilentReconnect();
       });
     } else if (!session){
       currentUser = null;
