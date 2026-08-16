@@ -655,15 +655,19 @@
   // ---------- Mutations ----------
   function addWeekly(text){
     text = (text||"").trim(); if (!text) return;
-    currentWeek().weekly.push({ id: uid(), text: text, done: false });
+    var q = { id: uid(), text: text, done: false };
+    currentWeek().weekly.push(q);
     lastFocus = { kind:"weekly" };
     commit();
+    pushGoogleCreateWeekly(q);
   }
   function addDaily(dateKey, text){
     text = (text||"").trim(); if (!text) return;
-    dayList(dateKey).push({ id: uid(), text: text, done: false });
+    var q = { id: uid(), text: text, done: false };
+    dayList(dateKey).push(q);
     lastFocus = { kind:"daily", date: dateKey };
     commit();
+    pushGoogleCreateDaily(q, dateKey);
   }
   function removeWeekly(id){
     var w = currentWeek();
@@ -875,6 +879,33 @@
     if (!q || !q.gtId || !q.gtListId || !googleAccessToken) return;
     googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(q.gtListId) + "/tasks/" + encodeURIComponent(q.gtId), {
       method: "DELETE"
+    }).catch(function(e){ googleLastError = e.message; });
+  }
+  function pushGoogleCreateDaily(q, dateKey){
+    if (!q || !googleAccessToken || !state.google.calendarListId) return;
+    var listId = state.google.calendarListId;
+    googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(listId) + "/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: q.text, due: dateKey + "T00:00:00.000Z" })
+    }).then(function(task){
+      q.gtId = task.id;
+      q.gtListId = listId;
+      q.gtDueKey = dateKey;
+      commit();
+    }).catch(function(e){ googleLastError = e.message; });
+  }
+  function pushGoogleCreateWeekly(q){
+    if (!q || !googleAccessToken || !state.google.miscListId) return;
+    var listId = state.google.miscListId;
+    googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(listId) + "/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: q.text })
+    }).then(function(task){
+      q.gtId = task.id;
+      q.gtListId = listId;
+      commit();
     }).catch(function(e){ googleLastError = e.message; });
   }
 
