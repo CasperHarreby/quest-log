@@ -307,12 +307,17 @@
   .check svg { width: 12px; height: 12px; opacity: 0; transform: scale(.5); transition: opacity .15s, transform .15s; }
   .quest.done .check { background: var(--emerald); border-color: var(--emerald); }
   .quest.done .check svg { opacity: 1; transform: scale(1); }
+  .q-body {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; gap: 4px;
+  }
   .q-text {
-    flex: 1; font-size: 13px; line-height: 1.4; color: var(--text);
+    font-size: 13px; line-height: 1.4; color: var(--text);
     word-break: break-word; cursor: pointer; padding-top: 1px;
   }
   .quest.done .q-text { color: var(--muted-2); text-decoration: line-through; text-decoration-color: rgba(167,159,192,0.5); }
   .weekly .q-text { font-size: 13.5px; }
+  .q-badges { display: flex; flex-wrap: wrap; gap: 6px; }
   .remove {
     flex: 0 0 auto; background: transparent; border: none; color: var(--muted-2);
     cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 6px;
@@ -324,12 +329,12 @@
   .overdue-badge {
     flex: 0 0 auto; font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
     color: var(--danger); border: 1px solid rgba(224,106,106,0.4);
-    border-radius: 6px; padding: 1px 5px; margin-top: 1px;
+    border-radius: 6px; padding: 1px 5px;
   }
   .g-badge {
     flex: 0 0 auto; font-size: 9px; font-weight: 700; color: var(--violet);
     border: 1px solid var(--line); border-radius: 5px; width: 15px; height: 15px;
-    display: grid; place-items: center; margin-top: 1px;
+    display: grid; place-items: center;
   }
 
   .empty { font-size: 12px; color: var(--muted-2); font-style: italic; padding: 4px 4px 8px; }
@@ -1138,8 +1143,10 @@
     return '<li class="quest' + (q.done ? ' done' : '') + '">' +
       '<button class="check" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" ' +
         'aria-pressed="' + q.done + '" aria-label="Toggle quest">' + CHECK_SVG + '</button>' +
-      '<span class="q-text" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" role="button" tabindex="0">' + esc(q.text) + '</span>' +
-      badges +
+      '<div class="q-body">' +
+        '<span class="q-text" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" role="button" tabindex="0">' + esc(q.text) + '</span>' +
+        (badges ? '<div class="q-badges">' + badges + '</div>' : '') +
+      '</div>' +
       '<button class="remove" data-act="remove" ' + scopeAttr + ' data-id="' + q.id + '" aria-label="Remove quest">×</button>' +
     '</li>';
   }
