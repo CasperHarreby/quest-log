@@ -241,50 +241,76 @@
   }
   .eyebrow::after { content:""; flex:1; height:1px; background: var(--line); }
 
+  /* ---------- Week layout (days + weekly sidebar) ---------- */
+  .week-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.8fr) minmax(240px, 1fr);
+    gap: 20px;
+    align-items: start;
+    margin-bottom: 28px;
+  }
+  @media (max-width: 820px) {
+    .week-layout { grid-template-columns: 1fr; }
+  }
+
   /* ---------- Weekly panel ---------- */
   .weekly {
     background: linear-gradient(180deg, var(--panel), var(--bg-2));
     border: 1px solid var(--line);
     border-radius: 16px;
     padding: 18px 20px;
-    margin-bottom: 28px;
   }
 
-  /* ---------- Days grid ---------- */
+  /* ---------- Days list ---------- */
   .days {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(146px, 1fr));
+    display: flex;
+    flex-direction: column;
     gap: 12px;
-    align-items: start;
   }
   .day {
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 14px;
-    padding: 12px 12px 14px;
-    min-height: 130px;
+    padding: 14px 16px;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 16px;
   }
   .day.today {
     border-color: var(--line-strong);
     background: linear-gradient(180deg, var(--panel-2), var(--panel));
     box-shadow: 0 0 0 1px rgba(231,178,76,0.12), 0 8px 26px rgba(0,0,0,0.35);
   }
-  .day-head {
-    display: flex; align-items: baseline; justify-content: space-between;
-    margin-bottom: 10px;
+  .day-label {
+    flex: 0 0 92px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding-top: 2px;
   }
-  .day-head .dow {
+  .day-label .dow {
     font-family: 'Cinzel', Georgia, serif;
     font-size: 13px; letter-spacing: 0.06em; color: var(--text);
   }
-  .day.today .day-head .dow { color: var(--gold-soft); }
-  .day-head .dom { font-size: 11px; color: var(--muted-2); }
+  .day.today .day-label .dow { color: var(--gold-soft); }
+  .day-label .dom { font-size: 11px; color: var(--muted-2); }
   .today-tag {
+    align-self: flex-start;
     font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
     color: var(--gold); border: 1px solid var(--line-strong);
     border-radius: 6px; padding: 1px 5px;
+  }
+  .day-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .day-body .add-row { margin-top: 8px; }
+  @media (max-width: 480px) {
+    .day { flex-direction: column; }
+    .day-label { flex: 0 0 auto; flex-direction: row; align-items: center; gap: 8px; }
   }
 
   /* ---------- Quest rows ---------- */
@@ -1179,14 +1205,16 @@
         : '<div class="empty">No quests</div>';
       daysHtml +=
         '<div class="day' + (isToday ? ' today' : '') + '">' +
-          '<div class="day-head">' +
+          '<div class="day-label">' +
             '<span class="dow">' + DOW[i] + '</span>' +
             (isToday ? '<span class="today-tag">Today</span>' : '<span class="dom">' + MON[d.getMonth()] + ' ' + d.getDate() + '</span>') +
           '</div>' +
-          rows +
-          '<div class="add-row">' +
-            '<input class="add-input" data-add="daily" data-date="' + dk + '" placeholder="Add quest…" maxlength="120" aria-label="Add quest for ' + DOW[i] + '">' +
-            '<button class="add-btn" data-act="add" data-add="daily" data-date="' + dk + '" aria-label="Add">+</button>' +
+          '<div class="day-body">' +
+            rows +
+            '<div class="add-row">' +
+              '<input class="add-input" data-add="daily" data-date="' + dk + '" placeholder="Add quest…" maxlength="120" aria-label="Add quest for ' + DOW[i] + '">' +
+              '<button class="add-btn" data-act="add" data-add="daily" data-date="' + dk + '" aria-label="Add">+</button>' +
+            '</div>' +
           '</div>' +
         '</div>';
     }
@@ -1239,17 +1267,21 @@
         '<button class="today-btn" data-act="today">Today</button>' +
       '</div>' +
 
-      '<section class="weekly">' +
-        '<p class="eyebrow">Weekly Quests</p>' +
-        '<ul class="quests">' + weeklyHtml + '</ul>' +
-        '<div class="add-row">' +
-          '<input class="add-input" data-add="weekly" placeholder="Add a weekly quest…" maxlength="120" aria-label="Add a weekly quest">' +
-          '<button class="add-btn" data-act="add" data-add="weekly" aria-label="Add">+</button>' +
+      '<div class="week-layout">' +
+        '<div class="days-col">' +
+          '<p class="eyebrow">The Week</p>' +
+          '<div class="days">' + daysHtml + '</div>' +
         '</div>' +
-      '</section>' +
 
-      '<p class="eyebrow">The Week</p>' +
-      '<div class="days">' + daysHtml + '</div>';
+        '<section class="weekly">' +
+          '<p class="eyebrow">Weekly Quests</p>' +
+          '<ul class="quests">' + weeklyHtml + '</ul>' +
+          '<div class="add-row">' +
+            '<input class="add-input" data-add="weekly" placeholder="Add a weekly quest…" maxlength="120" aria-label="Add a weekly quest">' +
+            '<button class="add-btn" data-act="add" data-add="weekly" aria-label="Add">+</button>' +
+          '</div>' +
+        '</section>' +
+      '</div>';
 
     requestAnimationFrame(function(){
       var f = document.getElementById("xpfill");
