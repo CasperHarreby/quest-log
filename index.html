@@ -8,7 +8,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
     --bg: #14101f;
@@ -505,6 +504,8 @@
   var GOOGLE_TASKS_SCOPE = 'https://www.googleapis.com/auth/tasks';
   var GOOGLE_LIST_NAMES = { calendar: 'Opgaver (Kalender)', misc: 'To-do (Misc)' };
   var GOOGLE_TASKS_API = 'https://tasks.googleapis.com/tasks/v1';
+  var GOOGLE_REDIRECT_URI = 'https://casperharreby.github.io/quest-log/';
+  var GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 
   // ---------- Config ----------
   var STORAGE_KEY = "questlog:v1";
@@ -529,12 +530,10 @@
 
   // ---------- Google Tasks runtime (never persisted) ----------
   var googleAccessToken = null;
-  var googleTokenClient = null;
+  var googleAccessTokenExpiresAt = 0; // epoch ms
   var googleSyncing = false;
   var googleLastError = null;
   var googleSyncStatus = 'disconnected'; // disconnected | idle | syncing | error
-  var pendingAfterAuth = null;
-  var googleSilentAttempt = false;
 
   // ---------- Date helpers ----------
   function pad(n){ return (n < 10 ? "0" : "") + n; }
@@ -789,44 +788,75 @@
   }
 
   // ---------- Google Tasks: auth ----------
-  function initGoogleTokenClient(){
-    if (googleTokenClient) return true;
-    if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return false;
-    googleTokenClient = google.accounts.oauth2.initTokenClient({
+  // Ongoing token refresh goes through the google-token Edge Function (a
+  // plain HTTPS call — never blocked by the browser's popup-gesture rule).
+  // Only the very first-ever authorization per Google account needs a
+  // full-page redirect to Google's consent screen, since that's the only
+  // way to obtain a refresh token (GIS's JS popup helpers don't support
+  // requesting offline access).
+  function buildGoogleAuthUrl(){
+    var oauthState = uid();
+    try { sessionStorage.setItem('googleOAuthState', oauthState); } catch(e){}
+    var params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: GOOGLE_REDIRECT_URI,
+      response_type: 'code',
       scope: GOOGLE_TASKS_SCOPE,
-      callback: handleGoogleTokenResponse
+      access_type: 'offline',
+      prompt: 'consent',
+      include_granted_scopes: 'true',
+      state: oauthState
+    });
+    return GOOGLE_AUTH_URL + '?' + params.toString();
+  }
+  function fetchGoogleTokenFromBackend(payload){
+    return sb.functions.invoke('google-token', { body: payload || {} }).then(function(res){
+      if (res.error) throw new Error(res.error.message || 'Google token request failed');
+      return res.data;
+    });
+  }
+  function ensureGoogleToken(){
+    if (googleAccessToken && Date.now() < googleAccessTokenExpiresAt){
+      return Promise.resolve();
+    }
+    return fetchGoogleTokenFromBackend({}).then(function(data){
+      if (data && data.access_token){
+        googleAccessToken = data.access_token;
+        googleAccessTokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+        return;
+      }
+      window.location.href = buildGoogleAuthUrl();
+      return new Promise(function(){}); // navigating away — never resolves
+    });
+  }
+  function handleGoogleAuthRedirect(){
+    var params = new URLSearchParams(window.location.search);
+    var code = params.get('code');
+    if (!code) return false;
+    var returnedState = params.get('state');
+    var expectedState = null;
+    try { expectedState = sessionStorage.getItem('googleOAuthState'); } catch(e){}
+    history.replaceState(null, '', window.location.pathname);
+    if (!returnedState || returnedState !== expectedState){
+      googleLastError = 'Google sign-in state mismatch — please try connecting again.';
+      return true;
+    }
+    fetchGoogleTokenFromBackend({ code: code, redirectUri: GOOGLE_REDIRECT_URI }).then(function(data){
+      if (data && data.access_token){
+        googleAccessToken = data.access_token;
+        googleAccessTokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+        syncGoogleTasks();
+      } else {
+        googleLastError = (data && data.error) || 'Google connection failed.';
+        googleSyncStatus = 'error';
+        render();
+      }
+    }).catch(function(e){
+      googleLastError = e.message;
+      googleSyncStatus = 'error';
+      render();
     });
     return true;
-  }
-  function handleGoogleTokenResponse(resp){
-    var wasSilent = googleSilentAttempt;
-    googleSilentAttempt = false;
-    if (resp && resp.access_token){
-      googleAccessToken = resp.access_token;
-      var cb = pendingAfterAuth; pendingAfterAuth = null;
-      if (cb) cb();
-      else if (wasSilent) syncGoogleTasks();
-    } else {
-      pendingAfterAuth = null;
-      if (!wasSilent) googleLastError = "Google sign-in was cancelled or failed.";
-      // a failed silent attempt fails quietly — stays disconnected, no error surfaced
-    }
-  }
-  function ensureGoogleToken(cb){
-    if (googleAccessToken){ cb(); return; }
-    if (!initGoogleTokenClient()){
-      googleLastError = "Google sign-in is still loading — try again in a moment.";
-      throw new Error(googleLastError);
-    }
-    pendingAfterAuth = cb;
-    googleTokenClient.requestAccessToken();
-  }
-  function attemptSilentReconnect(){
-    if (!state.google.calendarListId || !state.google.miscListId) return; // never connected before
-    if (!initGoogleTokenClient()) return; // GIS not loaded yet — user can still connect manually
-    googleSilentAttempt = true;
-    googleTokenClient.requestAccessToken({ prompt: '' });
   }
   function googleApiFetch(url, options, retried){
     options = options || {};
@@ -834,10 +864,8 @@
     return fetch(url, options).then(function(res){
       if (res.status === 401 && !retried){
         googleAccessToken = null;
-        return new Promise(function(resolve, reject){
-          ensureGoogleToken(function(){
-            googleApiFetch(url, options, true).then(resolve, reject);
-          });
+        return ensureGoogleToken().then(function(){
+          return googleApiFetch(url, options, true);
         });
       }
       if (!res.ok) return res.text().then(function(t){ throw new Error("Google API error " + res.status + ": " + t); });
@@ -1062,7 +1090,7 @@
       render();
     }
 
-    new Promise(function(resolve, reject){ ensureGoogleToken(resolve); })
+    ensureGoogleToken()
       .then(function(){ return resolveGoogleLists(); })
       .catch(function(err){
         // stale cached list id (e.g. 404) — re-resolve once and retry
@@ -1292,7 +1320,9 @@
         runOverdueRollover();
         showApp();
         render();
-        attemptSilentReconnect();
+        if (!handleGoogleAuthRedirect() && state.google.calendarListId){
+          syncGoogleTasks();
+        }
       });
     } else if (!session){
       currentUser = null;
