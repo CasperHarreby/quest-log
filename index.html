@@ -344,6 +344,21 @@
   .quest.done .q-text { color: var(--muted-2); text-decoration: line-through; text-decoration-color: rgba(167,159,192,0.5); }
   .weekly .q-text { font-size: 13.5px; }
   .q-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .move-input {
+    flex: 0 0 auto; align-self: center;
+    width: 108px;
+    background: rgba(0,0,0,0.22);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--muted);
+    font-family: inherit; font-size: 11px;
+    padding: 3px 5px;
+    color-scheme: dark;
+    opacity: 0; transition: opacity .12s, border-color .15s;
+    cursor: pointer;
+  }
+  .quest:hover .move-input, .quest:focus-within .move-input { opacity: 1; }
+  .move-input:hover, .move-input:focus { border-color: var(--violet-dim); outline: none; }
   .remove {
     flex: 0 0 auto; background: transparent; border: none; color: var(--muted-2);
     cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 6px;
@@ -742,6 +757,16 @@
     commit();
     pushGoogleCompletion(q);
   }
+  function moveDaily(fromDateKey, toDateKey, id){
+    if (!toDateKey || fromDateKey === toDateKey) return;
+    var q = find(dayList(fromDateKey), id); if (!q) return;
+    relocateQuest(q, fromDateKey, toDateKey);
+    if (q.gtId) q.gtDueKey = toDateKey;
+    commit();
+    pushGoogleDueDate(q, toDateKey);
+    var d = dateFromKey(toDateKey);
+    toast('Moved to ' + MON[d.getMonth()] + ' ' + d.getDate());
+  }
   function find(arr, id){ for (var i=0;i<arr.length;i++) if (arr[i].id===id) return arr[i]; return null; }
 
   function refreshDateBucket(dateKey){
@@ -750,6 +775,19 @@
     var any = arr.some(function(q){ return q.done; });
     if (any) state.completedDates[dateKey] = true;
     else delete state.completedDates[dateKey];
+  }
+
+  // Moves a daily quest object from one date's bucket to another (used by
+  // manual reschedule, overdue rollover, and picking up a due-date change
+  // made on the Google Tasks side).
+  function relocateQuest(q, fromDateKey, toDateKey){
+    if (fromDateKey === toDateKey) return;
+    var fromArr = state.weeks[toKey(mondayOf(dateFromKey(fromDateKey)))].days[fromDateKey];
+    var idx = fromArr.indexOf(q);
+    if (idx !== -1) fromArr.splice(idx, 1);
+    dayBucket(toDateKey).push(q);
+    refreshDateBucket(fromDateKey);
+    refreshDateBucket(toDateKey);
   }
 
   function resetAll(){
@@ -951,6 +989,14 @@
       method: "DELETE"
     }).catch(function(e){ googleLastError = e.message; });
   }
+  function pushGoogleDueDate(q, dateKey){
+    if (!q || !q.gtId || !q.gtListId || !googleAccessToken) return;
+    googleApiFetch(GOOGLE_TASKS_API + "/lists/" + encodeURIComponent(q.gtListId) + "/tasks/" + encodeURIComponent(q.gtId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ due: dateKey + "T00:00:00.000Z" })
+    }).catch(function(e){ googleLastError = e.message; });
+  }
   function pushGoogleCreateDaily(q, dateKey){
     if (!q || !googleAccessToken || !state.google.calendarListId) return Promise.resolve();
     var listId = state.google.calendarListId;
@@ -1030,7 +1076,19 @@
       var seen = {};
       items.forEach(function(task){
         seen[task.id] = true;
-        if (existing[task.id]) return; // already linked locally
+        var entry = existing[task.id];
+        if (entry){
+          // Already linked — pick up a due-date change made on the Google side.
+          if (task.due){
+            var d0 = new Date(task.due);
+            var newDueKey = d0.getUTCFullYear() + "-" + pad(d0.getUTCMonth()+1) + "-" + pad(d0.getUTCDate());
+            if (newDueKey !== entry.q.gtDueKey){
+              relocateQuest(entry.q, entry.dateKey, newDueKey >= todayKey ? newDueKey : todayKey);
+              entry.q.gtDueKey = newDueKey;
+            }
+          }
+          return;
+        }
         if (!task.due) return; // calendar list is due-date-driven only
         var d = new Date(task.due); // Google due is midnight UTC
         var dueKey = d.getUTCFullYear() + "-" + pad(d.getUTCMonth()+1) + "-" + pad(d.getUTCDate());
@@ -1086,15 +1144,7 @@
         });
       }
     }
-    if (!moves.length) return;
-    moves.forEach(function(m){
-      var fromArr = state.weeks[toKey(mondayOf(dateFromKey(m.fromKey)))].days[m.fromKey];
-      var idx = fromArr.indexOf(m.q);
-      if (idx !== -1) fromArr.splice(idx, 1);
-      dayBucket(todayKey).push(m.q);
-      refreshDateBucket(m.fromKey);
-    });
-    refreshDateBucket(todayKey);
+    moves.forEach(function(m){ relocateQuest(m.q, m.fromKey, todayKey); });
   }
 
   // ---------- Google Tasks: sync orchestration ----------
@@ -1161,11 +1211,14 @@
     return "In " + diff + " weeks";
   }
 
-  function questRow(q, scopeAttr, todayKey){
+  function questRow(q, scopeAttr, todayKey, dateKey){
     var overdue = todayKey && q.gtDueKey && q.gtDueKey < todayKey && !q.done;
     var badges =
       (overdue ? '<span class="overdue-badge" title="Originally due ' + q.gtDueKey + '">Overdue</span>' : '') +
       (q.gtId ? '<span class="g-badge" title="Synced from Google Tasks">G</span>' : '');
+    var moveInput = dateKey
+      ? '<input type="date" class="move-input" data-act="move" ' + scopeAttr + ' data-id="' + q.id + '" value="' + dateKey + '" aria-label="Move quest to a different day">'
+      : '';
     return '<li class="quest' + (q.done ? ' done' : '') + '">' +
       '<button class="check" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" ' +
         'aria-pressed="' + q.done + '" aria-label="Toggle quest">' + CHECK_SVG + '</button>' +
@@ -1173,6 +1226,7 @@
         '<span class="q-text" data-act="toggle" ' + scopeAttr + ' data-id="' + q.id + '" role="button" tabindex="0">' + esc(q.text) + '</span>' +
         (badges ? '<div class="q-badges">' + badges + '</div>' : '') +
       '</div>' +
+      moveInput +
       '<button class="remove" data-act="remove" ' + scopeAttr + ' data-id="' + q.id + '" aria-label="Remove quest">×</button>' +
     '</li>';
   }
@@ -1201,7 +1255,7 @@
       var isToday = dk === todayKey;
       var list = (week.days[dk] || []);
       var rows = list.length
-        ? '<ul class="quests">' + list.map(function(q){ return questRow(q, 'data-scope="daily" data-date="'+dk+'"', todayKey); }).join("") + '</ul>'
+        ? '<ul class="quests">' + list.map(function(q){ return questRow(q, 'data-scope="daily" data-date="'+dk+'"', todayKey, dk); }).join("") + '</ul>'
         : '<div class="empty">No quests</div>';
       daysHtml +=
         '<div class="day' + (isToday ? ' today' : '') + '">' +
@@ -1347,6 +1401,12 @@
       var scope = e.target.getAttribute("data-scope");
       if (scope === "weekly") toggleWeekly(e.target.getAttribute("data-id"));
       else toggleDaily(e.target.getAttribute("data-date"), e.target.getAttribute("data-id"));
+    }
+  });
+
+  document.addEventListener("change", function(e){
+    if (e.target.getAttribute && e.target.getAttribute("data-act") === "move"){
+      moveDaily(e.target.getAttribute("data-date"), e.target.value, e.target.getAttribute("data-id"));
     }
   });
 
